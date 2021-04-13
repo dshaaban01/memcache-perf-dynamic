@@ -11,6 +11,9 @@
 #include "mcperf.h"
 #include "Operation.h"
 
+#define MAX_INTERVALS 32
+//#define STATIC_ALLOC_SAMPLER
+
 //increase resolution slightly for the range of ~10ms
 #define _POW 1.08
 //at bin 200 the latency is >4s
@@ -20,153 +23,261 @@
 static int nm=0;
 #endif
 
-class LogHistogramSampler {
-public:
-  std::vector<uint64_t> bins;
+#ifdef STATIC_ALLOC_SAMPLER
+// Static allocation
 
-  std::vector<Operation> samples;
+  class LogHistogramSampler {
+  public:
+    int n_bins;
+    int n_intervals;
 
-  double sum;
-  double sum_sq;
+    std::vector<Operation> samples;
 
-  LogHistogramSampler() = delete;
-  LogHistogramSampler(int _bins) : sum(0.0), sum_sq(0.0) {
-    assert(_bins > 0);
+    uint64_t bins[MAX_INTERVALS][LOGSAMPLER_BINS+1];
 
-    bins.resize(_bins + 1, 0);
-  }
+    double sum[MAX_INTERVALS];
+    double sum_sq[MAX_INTERVALS];
 
-  void sample(const Operation &op) {
-    sample(op.time());
-    if (args.save_given) samples.push_back(op);
-  }
+    // Constructor
+    LogHistogramSampler(int n_bins, int n_intervals = 1) {
+      assert(n_bins > 0);
+      assert(n_intervals >= 1);
+      
+      this->n_bins = n_bins;
+      this->n_intervals = n_intervals;
 
-  void sample(double s) {
-    assert(s >= 0);
-    size_t bin = log(s)/log(_POW);
-
-    sum += s;
-    sum_sq += s*s;
-
-    //    I("%f", sum);
-
-    if ((int64_t) bin < 0) {
-      bin = 0;
-    } else if (bin >= bins.size()) {
-      bin = bins.size() - 1;
-    }
-
-    bins[bin]++;
-  }
-
-  double average() {
-    //    I("%f %d", sum, total());
-    return sum / total();
-  }
-
-  double stddev() {
-    //    I("%f %d", sum, total());
-    return sqrt(sum_sq / total() - pow(sum / total(), 2.0));
-  }
-
-  double minimum() {
-    for (size_t i = 0; i < bins.size(); i++)
-      if (bins[i] > 0) return pow(_POW, (double) i + 0.5);
-    DIE("Not implemented");
-  }
-
-  double get_nth(double nth) {
-    uint64_t count = total();
-    uint64_t n = 0;
-    double target = count * nth/100;
-    if (nth>100.0) {
-	target = count * nth/1000;
-    }
-    if (nth>1000.0) {
-	target = count * nth/10000;
-    }
-
-    for (size_t i = 0; i < bins.size(); i++) {
-      n += bins[i];
-
-      if (n > target) { // The nth is inside bins[i].
-        double left = target - (n - bins[i]);
-        return pow(_POW, (double) i) +
-          left / bins[i] * (pow(_POW, (double) (i+1)) - pow(_POW, (double) i));
+      for(int i = 0; i < n_intervals; i++) {
+        for(int j = 0; j < LOGSAMPLER_BINS+1; j++) {
+          bins[i][j] = 0;
+        }
+        sum[i] = 0;
+        sum_sq[i] = 0;
       }
     }
+    LogHistogramSampler() = delete;
 
-    return pow(_POW, bins.size());
-  } 
+    // Log
+    void sample(const Operation &op) {
+      sample(op.time(), op.interval);
+      if (args.save_given) samples.push_back(op);
+    }
 
-  uint64_t total() {
-    uint64_t sum = 0.0;
-	std::vector<uint64_t>::iterator i;
+    // Sample
+    void sample(double s, int interval = 0) {
+      assert(s >= 0);
+      size_t bin = log(s)/log(_POW);
 
-    for (i = bins.begin(); i!=bins.end(); i++) sum += *i;
+      sum[interval] += s;
+      sum_sq[interval] += s*s;
 
-    return sum;
-  }
+      if ((int64_t) bin < 0) {
+        bin = 0;
+      } else if (bin >= n_bins) {
+        bin = n_bins - 1;
+      }
 
-  void accumulate(const LogHistogramSampler &h) {
-    assert(bins.size() == h.bins.size());
-    for (size_t i = 0; i < bins.size(); i++) bins[i] += h.bins[i];
+      bins[interval][bin]++;
+    }
 
-    sum += h.sum;
-    sum_sq += h.sum_sq;
-	std::vector<Operation>::const_iterator hi;
+    // Statistics
+    uint64_t total(int interval = 0) {
+      uint64_t sum = 0.0;
 
-    for (hi=h.samples.begin();  hi!=h.samples.end(); hi++) samples.push_back(*hi);
-  }
-  void plot(const char *tag, double QPS) {
-	if (sum<100) return;
-#ifdef GNUPLOT
-	gnuplot_ctrl    *   h1;
-	char fn[42];
-	char plot_name[80];
-	int size,i,ifirst,ilast;
-	//find start of latency bins
-	for (i=0; i<bins.size(); i++) {
-		if (bins[i] > 0)
-			break;
-	}
-	ifirst=i;
-	for (; i<bins.size(); i++) {
-		if ((bins[i] == 0 ) && (bins[i+1] == 0))
-			break;
-	}
-	ilast=i+1;
-	D("Plotting bins %d to %d\n",ifirst,ilast);
-	//find end of latency bins
-	size=ilast-ifirst;
+      for (int i = 0; i < n_bins; i++) sum += bins[interval][i];
 
-	double *x=(double *)malloc(size * sizeof(double));
-	double *y=(double *)malloc(size * sizeof(double));
-	//data for the plot
-	for (i=ifirst; i<ilast; i++) {
-		int id=i-ifirst;
-		x[id]=pow(_POW, (double) i) / 1000.0;
-		y[id]=bins[i];
-	}
-	//plot the bins
-	h1 = gnuplot_init() ;
-	const char *hstyle="impulses";
-    	gnuplot_setstyle(h1, (char *)hstyle) ;
-	gnuplot_cmd(h1, "set terminal png");
-	gnuplot_cmd(h1, "set xtics rotate");
-	sprintf(fn,"set output \"histogram_%s_%02d.png\"",tag,nm);
-    	gnuplot_cmd(h1, fn);
-	sprintf(plot_name,"Latency Histogram (Total=%ldK QPS=%fK)", total() / (1000), QPS/1000.0);
-	gnuplot_plot_xy(h1, x, y, size, plot_name) ;
-        sprintf(fn,"histogram_%s_%02d.csv",tag,nm);
-	gnuplot_write_xy_csv(fn,x,y,size,plot_name);
-	nm++;
-	gnuplot_close(h1);
-	free(x);
-	free(y);
+      return sum;
+    }
+
+    double average(int interval = 0) {
+      return sum[interval] / total(interval);
+    }
+
+    double stddev(int interval = 0) {
+      return sqrt(sum_sq[interval] / total(interval) - pow(sum[interval] / total(interval), 2.0));
+    }
+
+    double minimum(int interval = 0) {
+      for (size_t i = 0; i < n_intervals; i++)
+        if (bins[interval][i] > 0) return pow(_POW, (double) i + 0.5);
+      DIE("Not implemented");
+    }
+
+    double get_nth(double nth, int interval = 0) {
+      uint64_t count = total(interval);
+      uint64_t n = 0;
+      double target = count * nth/100;
+
+      if (nth>100.0) {
+        target = count * nth/1000;
+      }
+      if (nth>1000.0) {
+        target = count * nth/10000;
+      }
+
+      for (size_t i = 0; i < n_bins; i++) {
+        n += bins[interval][i];
+
+        if (n > target) { // The nth is inside bins[i].
+          double left = target - (n - bins[interval][i]);
+          return pow(_POW, (double) i) +
+            left / bins[interval][i] * (pow(_POW, (double) (i+1)) - pow(_POW, (double) i));
+        }
+      }
+
+      return pow(_POW, n_bins);
+    } 
+
+    // Accumulation 
+    void accumulate(const LogHistogramSampler &h) {
+      for(int i = 0; i < n_intervals; i++) {
+          //assert(bins[i].size() == h.bins[i].size());
+          for (size_t j = 0; j < n_bins; j++) bins[i][j] += h.bins[i][j];
+
+          sum[i] += h.sum[i];
+          sum_sq[i] += h.sum_sq[i];
+      }
+
+      std::vector<Operation>::const_iterator hi;
+      for (hi=h.samples.begin();  hi!=h.samples.end(); hi++) samples.push_back(*hi);
+    }
+    
+    // TODO: Re-enable
+    void plot(const char *tag, double QPS) { }
+  };
+
+#else
+// Dynamic allocation
+
+    class LogHistogramSampler {
+  public:
+    int n_bins;
+    int n_intervals;
+
+    std::vector<Operation> samples;
+
+    // Dynamic allocation
+    uint64_t **bins;
+
+    double *sum;
+    double *sum_sq;
+
+    // Constructor
+    LogHistogramSampler(int n_bins, int n_intervals = 1) {
+      assert(n_bins > 0);
+      assert(n_intervals >= 1);
+      
+      this->n_bins = n_bins;
+      this->n_intervals = n_intervals;
+
+      bins = new uint64_t*[n_intervals];
+      for(int i = 0; i < n_intervals; i++) {
+        bins[i] = new uint64_t[LOGSAMPLER_BINS+1] ();
+      }
+
+      sum = new double[n_intervals] ();
+      sum_sq = new double[n_intervals] ();
+    }
+    LogHistogramSampler() = delete;
+
+    // Destructor
+    ~LogHistogramSampler() {
+      for(int i = 0; i < n_intervals; i++) {
+        delete[] bins[i];
+      }
+      delete[] bins;
+
+      delete[] sum;
+      delete[] sum_sq;
+    }
+
+    // Log
+    void sample(const Operation &op) {
+      sample(op.time(), op.interval);
+      if (args.save_given) samples.push_back(op);
+    }
+
+    // Sample
+    void sample(double s, int interval = 0) {
+      assert(s >= 0);
+      size_t bin = log(s)/log(_POW);
+
+      sum[interval] += s;
+      sum_sq[interval] += s*s;
+
+      if ((int64_t) bin < 0) {
+        bin = 0;
+      } else if (bin >= n_bins) {
+        bin = n_bins - 1;
+      }
+
+      bins[interval][bin]++;
+    }
+
+    // Statistics
+    uint64_t total(int interval = 0) {
+      uint64_t sum = 0.0;
+
+      for (int i = 0; i < n_bins; i++) sum += bins[interval][i];
+
+      return sum;
+    }
+
+    double average(int interval = 0) {
+      return sum[interval] / total(interval);
+    }
+
+    double stddev(int interval = 0) {
+      return sqrt(sum_sq[interval] / total(interval) - pow(sum[interval] / total(interval), 2.0));
+    }
+
+    double minimum(int interval = 0) {
+      for (size_t i = 0; i < n_intervals; i++)
+        if (bins[interval][i] > 0) return pow(_POW, (double) i + 0.5);
+      DIE("Not implemented");
+    }
+
+    double get_nth(double nth, int interval = 0) {
+      uint64_t count = total(interval);
+      uint64_t n = 0;
+      double target = count * nth/100;
+
+      if (nth>100.0) {
+        target = count * nth/1000;
+      }
+      if (nth>1000.0) {
+        target = count * nth/10000;
+      }
+
+      for (size_t i = 0; i < n_bins; i++) {
+        n += bins[interval][i];
+
+        if (n > target) { // The nth is inside bins[i].
+          double left = target - (n - bins[interval][i]);
+          return pow(_POW, (double) i) +
+            left / bins[interval][i] * (pow(_POW, (double) (i+1)) - pow(_POW, (double) i));
+        }
+      }
+
+      return pow(_POW, n_bins);
+    } 
+
+    // Accumulation 
+    void accumulate(const LogHistogramSampler &h) {
+      for(int i = 0; i < n_intervals; i++) {
+          for (size_t j = 0; j < n_bins; j++) bins[i][j] += h.bins[i][j];
+
+          sum[i] += h.sum[i];
+          sum_sq[i] += h.sum_sq[i];
+      }
+
+      std::vector<Operation>::const_iterator hi;
+      for (hi=h.samples.begin();  hi!=h.samples.end(); hi++) samples.push_back(*hi);
+    }
+    
+    // TODO: Re-enable
+    void plot(const char *tag, double QPS) { }
+  };
+
 #endif
-  }
-
-};
 
 #endif // LOGHISTOGRAMSAMPLER_H

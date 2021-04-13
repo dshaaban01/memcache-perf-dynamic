@@ -17,6 +17,7 @@ public:
   type_enum type;
   int n_req;
   int n_recv;
+  int interval = 0;
 
   string key;
   // string value;

@@ -29,7 +29,7 @@ Connection::Connection(struct event_base* _base, struct evdns_base* _evdns,
                        bool sampling, 
 					   int key_capacity, int key_reuse, int key_regen) :
   hostname(_hostname), port(_port), start_time(0),
-  stats(sampling), options(_options), base(_base), evdns(_evdns), read_state(INIT_READ)
+  stats(sampling, _options.n_intervals), options(_options), base(_base), evdns(_evdns), read_state(INIT_READ)
 {
   valuesize = createGenerator(options.valuesize);
   keysize = createGenerator(options.keysize);
@@ -41,13 +41,31 @@ Connection::Connection(struct event_base* _base, struct evdns_base* _evdns,
   }
   loadgen=new KeyGenerator(keysize,options.records);
 
+  // DYNAMIC operation
+  dyn_agent = options.dyn_agent;
+  next_run_time = 0.0;
+  curr_interval = 0;
+  qps_interval = options.qps_interval;
+  n_intervals = options.n_intervals;
+  curr_id = 0;
+
+  if(dyn_agent) {
+    lambda_dyn = new double[n_intervals];
+    for(int i = 0; i < n_intervals; i++) {
+      lambda_dyn[i] = options.lambda_dyn[i];
+    }
+  }
+
   if (options.lambda <= 0) {
     iagen = createGenerator("0");
   } else {
     D("iagen = createGenerator(%s)", options.ia);
     iagen = createGenerator(options.ia);
-    iagen->set_lambda(options.lambda);
-  }
+    if(dyn_agent) {
+      iagen->set_lambda(options.lambda_dyn[0]); }
+    else 
+      iagen->set_lambda(options.lambda);
+  } 
 
   write_state = INIT_WRITE;
 
@@ -77,6 +95,10 @@ Connection::~Connection() {
   delete keygen;
   delete keysize;
   delete valuesize;
+
+  if(dyn_agent) {
+    delete[] lambda_dyn;
+  }
 }
 
 void Connection::reset() {
@@ -85,7 +107,7 @@ void Connection::reset() {
   evtimer_del(timer);
   read_state = IDLE;
   write_state = INIT_WRITE;
-  stats = ConnectionStats(stats.sampling);
+  stats = ConnectionStats(stats.sampling, n_intervals);
 }
 
 void Connection::issue_command(char *cmd) {
@@ -108,7 +130,7 @@ void Connection::issue_sasl() {
   bufferevent_write(bev, password.c_str(), password.length());
 }
 
-void Connection::issue_get_req(const char* key, const char *req, double now) {
+void Connection::issue_get(const char* key, const char *req, double now, int interval) {
   Operation op;
   int l;
   op.n_req=1;
@@ -130,6 +152,7 @@ void Connection::issue_get_req(const char* key, const char *req, double now) {
   }
 #endif
   op.type = Operation::GET;
+  op.interval = interval;
   op.key = string(key);
   op_queue.push(op);
 
@@ -158,11 +181,7 @@ void Connection::issue_get_req(const char* key, const char *req, double now) {
 
 }
 
-void Connection::issue_get(const char* key, double now) {
-	Connection::issue_get_req(key,NULL,now);
-}
-
-void Connection::issue_multi_get(int nkeys, double now) {
+void Connection::issue_multi_get(int nkeys, double now, int interval) {
   Operation op;
   int l=0;
   char* key;
@@ -188,6 +207,7 @@ void Connection::issue_multi_get(int nkeys, double now) {
 #endif
 
 	op.type = Operation::GET;
+  op.interval = interval;
 	op.n_req=nkeys;
 	op_queue.push(op);
 
@@ -240,7 +260,7 @@ void Connection::issue_multi_get(int nkeys, double now) {
 }
 
 void Connection::issue_set(const char* key, const char* value, int length,
-                           double now) {
+                           double now, int interval) {
   Operation op;
   int l;
   uint16_t keylen = strlen(key);
@@ -253,6 +273,7 @@ void Connection::issue_set(const char* key, const char* value, int length,
 #endif
 
   op.type = Operation::SET;
+  op.interval = interval;
   op_queue.push(op);
 
   if (read_state == IDLE)
@@ -279,23 +300,23 @@ void Connection::issue_set(const char* key, const char* value, int length,
   if (read_state != LOADING) stats.tx_bytes += l;
 }
 
-void Connection::issue_something(double now) {
+void Connection::issue_something(double now, int interval) {
 	const char *key = keygen->generate_next();
 	if ((options.update > 0) || (options.getq_freq > 0)) {
-  		if (drand48() < options.update) {
-	    	int index = lrand48() % (1024 * 1024);
-			issue_set(key, &random_char[index], valuesize->generate(), now);
+  	if (drand48() < options.update) {
+	    int index = lrand48() % (1024 * 1024);
+			issue_set(key, &random_char[index], valuesize->generate(), now, interval);
 			return;
 		} else {
 			if (drand48() < options.getq_freq) {
-				issue_multi_get(options.getq_size,now);
+				issue_multi_get(options.getq_size, now, interval);
 				return;
 			}
 		}
 		//Otherwise fall through to simple get
 	} 
 	const char *req = keygen->current_get_req();
-	issue_get_req(key, req, now);
+	issue_get(key, req, now, interval);
 }
 
 void Connection::pop_op() {
@@ -340,77 +361,99 @@ void Connection::drive_write_machine(double now) {
 
   while (1) {
     switch (write_state) {
-    case INIT_WRITE:
-      delay = iagen->generate();
+      
+      case INIT_WRITE:
+        delay = iagen->generate();
 
-      next_time = now + delay;
-      double_to_tv(delay, &tv);
-      evtimer_add(timer, &tv);
+        next_time = now + delay;
+        next_run_time = delay;
+        double_to_tv(delay, &tv);
+        evtimer_add(timer, &tv);
 
-      write_state = WAITING_FOR_TIME;
-      break;
-
-    case ISSUING:
-      if (op_queue.size() >= (size_t) options.depth) {
-        write_state = WAITING_FOR_OPQ;
-        return;
-      } else if (now < next_time) {
         write_state = WAITING_FOR_TIME;
-        break; // We want to run through the state machine one more time
-               // to make sure the timer is armed.
-        //      } else if (options.moderate && options.lambda > 0.0 &&
-        //                 now < last_rx + 0.25 / options.lambda) {
-      } else if (options.moderate && now < last_rx + 0.00025) {
-        write_state = WAITING_FOR_TIME;
-        if (!event_pending(timer, EV_TIMEOUT, NULL)) {
-          //          delay = last_rx + 0.25 / options.lambda - now;
-          delay = last_rx + 0.00025 - now;
-          //          I("MODERATE %f %f %f %f %f", now - last_rx, 0.25/options.lambda,
-            //            1/options.lambda, now-last_tx, delay);
-          
-          double_to_tv(delay, &tv);
-          evtimer_add(timer, &tv);
+        break;
+
+      case WAITING_FOR_TIME:
+        if (now < next_time) {
+          if (!event_pending(timer, EV_TIMEOUT, NULL)) {
+            delay = next_time - now;
+            double_to_tv(delay, &tv);
+            evtimer_add(timer, &tv);
+          }
+          return;
         }
-        return;
-      }
 
-      issue_something(now);
-      last_tx = now;
-      stats.log_op(op_queue.size());
+        write_state = ISSUING;
+        break;
 
-      next_time += iagen->generate();
+      case ISSUING:
+        if (op_queue.size() >= (size_t) options.depth) {
+          write_state = WAITING_FOR_OPQ;
+          return;
+        } else if (now < next_time) {
+          write_state = WAITING_FOR_TIME;
+          break; // We want to run through the state machine one more time
+                // to make sure the timer is armed.
+          //      } else if (options.moderate && options.lambda > 0.0 &&
+          //                 now < last_rx + 0.25 / options.lambda) {
+        } else if (options.moderate && now < last_rx + 0.00025) {
+          write_state = WAITING_FOR_TIME;
+          if (!event_pending(timer, EV_TIMEOUT, NULL)) {
+            //          delay = last_rx + 0.25 / options.lambda - now;
+            delay = last_rx + 0.00025 - now;
+            //          I("MODERATE %f %f %f %f %f", now - last_rx, 0.25/options.lambda,
+              //            1/options.lambda, now-last_tx, delay);
+            
+            double_to_tv(delay, &tv);
+            evtimer_add(timer, &tv);
+          }
+          return;
+        }
 
-      if (options.skip && options.lambda > 0.0 &&
+        issue_something(now, curr_interval);
+        last_tx = now;
+        stats.log_op(op_queue.size());
+
+        delay = iagen->generate();
+        next_time += delay;
+        next_run_time += delay;
+
+        if(next_run_time > qps_interval * (1 + curr_interval)) {
+          curr_interval++;
+          if(dyn_agent && curr_interval < n_intervals) {
+            iagen->set_lambda(lambda_dyn[curr_interval]);
+          }
+        }
+
+        if (options.skip && options.lambda > 0.0 &&
           now - next_time > 0.005000 &&
           op_queue.size() >= (size_t) options.depth) {
 
-        while (next_time < now - 0.004000) {
-          stats.skips++;
-          next_time += iagen->generate();
+          while (next_time < now - 0.004000) {
+            stats.skips++;
+
+            delay = iagen->generate();
+            next_time += delay;
+            next_run_time += delay;
+
+            if(next_run_time > qps_interval * (1 + curr_interval)) {
+              curr_interval++;
+              if(dyn_agent && curr_interval < n_intervals) {
+                iagen->set_lambda(lambda_dyn[curr_interval]);
+              }
+            }
+          }
         }
-      }
 
-      break;
+        break;
 
-    case WAITING_FOR_TIME:
-      if (now < next_time) {
-        if (!event_pending(timer, EV_TIMEOUT, NULL)) {
-          delay = next_time - now;
-          double_to_tv(delay, &tv);
-          evtimer_add(timer, &tv);
-        }
-        return;
-      }
+      case WAITING_FOR_OPQ:
+        if (op_queue.size() >= (size_t) options.depth) return;
+        write_state = ISSUING;
+        break;
 
-      write_state = ISSUING;
-      break;
+      default: DIE("Not implemented");
 
-    case WAITING_FOR_OPQ:
-      if (op_queue.size() >= (size_t) options.depth) return;
-      write_state = ISSUING;
-      break;
-
-    default: DIE("Not implemented");
     }
   }
 }

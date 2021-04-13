@@ -1,9 +1,11 @@
-Memcache-perf
+Memcache-perf-dynamic
 =============
 
-Memcache-perf is a memcached load generator designed for high request
+Memcache-perf-dynamic is a dynamic memcached load generator designed for high request
 rates, good tail-latency measurements, and realistic request stream
 generation.
+
+The tool provides the capability to generate fully varying load, both random and supplied.
 
 Requirements
 ============
@@ -20,6 +22,31 @@ Building
     apt-get install libevent-dev libzmq3-dev
     apt-get build-dep memcached
     make
+
+Dynamic Load
+===============
+
+The following example will generate a dynamic load which will target random 
+QPS between --qps_min and --qps_max. 
+Target QPS will change at every passing --qps_interval, in this example set at 10 seconds.
+The seed can be explicitly set with --qps_seed, otherwise it will be random.
+
+    agent1$ mcperf -T 16 -A
+    master$ mcperf -s memcached_server --noload \
+		-a agent1  -T 16 -C 4 -D 4 -Q 1000 -c 4 -t 50 \
+		--qps_interval 10 --qps_min 10000 --qps_max 50000 \
+		--qps_seed 23
+
+Dynamic load can also be explicitly provided by the user. In this case the 
+user needs to provide the --qps_target multiple times.
+Each entry will set a target QPS in the corresponding interval (sequential).
+Total number of intervals (and overall execution time) in this case is equal to the number
+of targets, each lasting an interval.
+
+	agent1$ mcperf -T 16 -A
+    master$ mcperf -s memcached_server --noload \
+		-a agent1  -T 16 -C 4 -D 4 -Q 1000 -c 4 \
+		--qps_interval 10 --qps_target 32000 --qps_target 74000
 
 Basic Usage
 ===========
@@ -125,10 +152,26 @@ Command-line Options
     
     "High-performance" memcached benchmarking tool
     
-      -h, --help                    Print help and exit
-          --version                 Print version and exit
-      -v, --verbose                 Verbosity. Repeat for more verbose.
-          --quiet                   Disable log messages.
+	  -h, --help                    Print help and exit
+	      --version                 Print version and exit
+	  -v, --verbose                 Verbosity. Repeat for more verbose.
+	      --quiet                   Disable log messages.
+
+	Dynamic options:
+	      --qps_interval            The length of each target interval QPS. 
+	                                  Also enables dynamic load genearation.
+	      --qps_max                 Maximum QPS in random waveform.
+	                                  (default=`100000')
+	      --qps_min                 Minimum QPS in random waveform. 
+	                                  (default=`1000')
+	      --qps_seed                Seed for random waveform. When 0,
+                                      will generate random seed.
+	                                  (default=`0')
+          --qps_target              Interval QPS for supplied waveform. 
+                                      Can be provided multiple times for 
+	                                  different intervals. Generates target 
+                                      waveform. The overall execution time will
+                                      depend on the number of provided targets.
     
     Basic options:
       -s, --server=STRING           Memcached server hostname[:port].  Repeat to 

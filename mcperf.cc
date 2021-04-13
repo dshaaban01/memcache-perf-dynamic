@@ -8,6 +8,9 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
+
+#include <iostream>
 
 #include <queue>
 #include <string>
@@ -283,6 +286,176 @@ static bool s_send (zmq::socket_t &socket, const std::string &string) {
  * own ConnectionStats to compute overall statistics.
  */
 
+// ----------------------------------------------------------------------------------------------------
+void prep_agent(const vector<string>& servers, options_t& options) {
+  int sum = options.lambda_denom;
+  int aid=0;
+  if (args.measure_connections_given)
+    sum = args.measure_connections_arg * options.server_given * options.threads;
+
+  int master_sum = sum;
+  if (args.measure_qps_given) {
+    sum = 0;
+    if (options.qps) options.qps -= args.measure_qps_arg;
+  }
+  vector<zmq::socket_t*>::iterator its;
+  for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
+    zmq::socket_t *s=*its;
+    zmq::message_t message(sizeof(options_t));
+    bool status;
+    aid++;
+
+    V("Agent %d prep ", aid);
+      memcpy((void *) message.data(), &options, sizeof(options_t));
+      status=poll_send(*s,message);
+    D("Agent %d prep send = %s", aid, status?"true":"false");
+
+      zmq::message_t rep;
+      status=poll_recv(*s,&rep);
+    D("Agent %d prep recv= %s", aid, status?"true":"false");
+    if (!status) { // problem communicating with this agent, don't use it!
+      W("Agent failure detected, skip agent %d!",aid);
+      its=agent_sockets.erase(its); // remove from list of active agents
+      delete(s);
+      its--; // adjust the iterator since we did not iterate over the next agent
+      continue;
+    }
+      unsigned int num = *((int *) rep.data());
+
+      sum += options.connections * (options.roundrobin ?
+              (servers.size() > num ? servers.size() : num) : 
+              (servers.size() * num));
+    int itid=0;
+    //collect all servers to a single msg
+    string all_servers;
+    deTokenize(all_servers,servers);
+    //send servers msg to agent and wait for ack
+    s_send(*s, all_servers);
+    string response = s_recv(*s);
+    if (response.compare("FAIL-RECV") == 0) {
+      itid=-1;
+    }
+
+    // in case communication with agent broke down, remove from active list
+    if (itid<0) {
+      W("Agent failure detected, skip agent %d!",aid);
+      its=agent_sockets.erase(its); // remove from list of active agents
+      delete(s);
+      its--; // adjust the iterator since we did not iterate over the next agent
+    }
+  }
+
+  //
+  // Dynamic operation
+  //
+  if(options.dyn_en) {
+    int avg_qps = 0;
+
+    options.qps_dyn = new int[options.n_intervals];
+    
+  
+    if(options.trace_en) {
+      // Supplied waveform
+      std::cout << "Supplied waveform" << std::endl;
+      std::cout << "Total number of intervals = " << options.n_intervals << " (";
+      
+      for (int i = 0; i < options.n_intervals; i++) {
+        options.qps_dyn[i] = args.qps_target_arg[i];
+        if (args.measure_qps_given) {
+          options.qps_dyn[i] -= args.measure_qps_arg;
+        }
+        std::cout << options.qps_dyn[i] + args.measure_qps_arg; if(i != options.n_intervals - 1) std::cout << ", ";
+        avg_qps += options.qps_dyn[i] + args.measure_qps_arg;
+      }
+    } else {
+      // Random waveform
+      std::cout << "Random waveform, " << ((options.qps_seed ==  0) ? "random seed" : "supplied seed") << std::endl;
+      std::cout << "Total number of intervals = " << options.n_intervals << " (";
+      
+      std::uniform_int_distribution<int> rgen(options.qps_min, options.qps_max);
+      std::default_random_engine reng;
+      if(options.qps_seed != 0) {
+        // Supplied seed
+        reng.seed(options.qps_seed);
+      } else {
+        // Random seed
+        reng.seed(std::chrono::system_clock::now().time_since_epoch().count());
+      }   
+
+      for (int i = 0; i < options.n_intervals; i++) {
+        options.qps_dyn[i] = rgen(reng);
+        if (args.measure_qps_given) {
+          options.qps_dyn[i] -= args.measure_qps_arg;
+        }
+        std::cout << options.qps_dyn[i] + args.measure_qps_arg; if(i != options.n_intervals - 1) std::cout << ", ";
+        avg_qps += options.qps_dyn[i] + args.measure_qps_arg;
+      }
+    }
+    std::cout << ")" << std::endl;
+    std::cout << "Average QPS expected = " << avg_qps / options.n_intervals << std::endl;
+
+    //
+    // Send dynamic qps to the agents
+    //
+    for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
+      zmq::socket_t *s=*its;
+      zmq::message_t message(options.n_intervals * sizeof(int));
+      memcpy((void *) message.data(), (void *) options.qps_dyn, options.n_intervals * sizeof(int));
+
+      poll_send(*s,message);
+      string rep = s_recv(*s);
+      
+      if (rep.compare("FAIL-RECV") == 0) {
+        W("Agent failure detected, skip agent %d!",aid);
+        its=agent_sockets.erase(its); // remove from list of active agents
+        delete(s);
+        its--; // adjust the iterator since we did not iterate over the next agent
+      }
+    }
+  }
+
+  // Adjust options_t according to --measure_* arguments.
+  options.lambda_denom = sum;
+  options.lambda = (double) options.qps / options.lambda_denom * args.lambda_mul_arg;
+
+  // DEBUG
+  V("lambda_denom = %d", sum);
+
+  if (args.measure_qps_given) {
+    double master_lambda = (double) args.measure_qps_arg / master_sum;
+
+    if (options.qps && master_lambda > options.lambda)
+      V("warning: master_lambda (%f) > options.lambda (%f)",
+        master_lambda, options.lambda);
+
+    options.lambda = master_lambda;
+  }
+
+  if (args.measure_depth_given) options.depth = args.measure_depth_arg;
+
+  for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
+    zmq::socket_t *s=*its;
+    zmq::message_t message(sizeof(sum));
+    *((int *) message.data()) = sum;
+    poll_send(*s,message);
+    string rep = s_recv(*s);
+
+    if (rep.compare("FAIL-RECV") == 0) {
+      W("Agent failure detected, skip agent %d!",aid);
+      its=agent_sockets.erase(its); // remove from list of active agents
+      delete(s);
+      its--; // adjust the iterator since we did not iterate over the next agent
+    }
+  }
+
+  // Master sleeps here to give agents a chance to connect to
+  // memcached server before the master, so that the master is never
+  // the very first set of connections.  Is this reasonable or
+  // necessary?  Most probably not.
+  V("MASTER SLEEPS"); sleep_time(1.5);
+}
+
+// ----------------------------------------------------------------------------------------------------
 void agent() {
   zmq::context_t context(1);
 
@@ -318,26 +491,51 @@ V("sent ack");
 
     options.threads = args.threads_arg;
 
+    // Get the dynamic QPS
+    options.dyn_agent = options.dyn_en;
+    if(options.dyn_en) {
+      socket.recv(&request);
+      options.qps_dyn = new int[options.n_intervals];
+      memcpy((void*)options.qps_dyn, request.data(), options.n_intervals * sizeof(int));
+      s_send(socket, "THANKS");
+      V("sent tnx 1");
+    }
+    
+    // Get lambda adjusted
     socket.recv(&request);
     options.lambda_denom = *((int *) request.data());
     s_send(socket, "THANKS");
-V("sent tnx");
+    V("sent tnx 2");
 
-    //    V("AGENT SLEEPS"); sleep(1);
-    options.lambda = (double) options.qps / options.lambda_denom * args.lambda_mul_arg;
+    // Adjust lambda
+    if(options.dyn_agent) {
+      options.lambda = (double) options.qps_min / options.lambda_denom * args.lambda_mul_arg;
 
-    V("lambda_denom = %d, lambda = %f, qps = %d",
-      options.lambda_denom, options.lambda, options.qps);
+      // Dynamic lambdas
+      options.lambda_dyn = new double[options.n_intervals];
+      for(int i = 0; i < options.n_intervals; i++)
+        options.lambda_dyn[i] = (double) options.qps_dyn[i] / options.lambda_denom * args.lambda_mul_arg;
 
-    //    if (options.threads > 1)
-      pthread_barrier_init(&barrier, NULL, options.threads);
+    } else {
+      options.lambda = (double) options.qps / options.lambda_denom * args.lambda_mul_arg;
+    }
 
-    ConnectionStats stats = ConnectionStats();
+    V("lambda_denom = %d, lambda = %f, qps = %d, qps_min = %d, qps_max = %d,", 
+      options.lambda_denom, options.lambda, options.qps, options.qps_min, options.qps_max);
+
+    // Barrier
+    pthread_barrier_init(&barrier, NULL, options.threads);
+
+    ConnectionStats stats = ConnectionStats(true, options.n_intervals);
+
 V("launching go");
-
+    // Run 
     go(servers, options, stats, &socket);
+
 V("Done run.");
-    AgentStats as;
+    // Run done. Send the stats back to the master.
+#ifdef STATIC_ALLOC_SAMPLER
+    AgentStats as = AgentStats();
 
     as.rx_bytes = stats.rx_bytes;
     as.tx_bytes = stats.tx_bytes;
@@ -347,147 +545,170 @@ V("Done run.");
     as.start = stats.start;
     as.stop = stats.stop;
     as.skips = stats.skips;
-#ifdef LOGSAMPLER_BINS
-	for (int i=0; i<LOGSAMPLER_BINS; i++) 
-		as.get_bins[i]=stats.get_sampler.bins[i];
-	as.get_sum = stats.get_sampler.sum;
-	as.get_sum_sq = stats.get_sampler.sum_sq;
-#endif	
+    
+    for(int i = 0; i < options.n_intervals; i++){
+      as.gets_dyn[i] = stats.gets_dyn[i];
+      as.sets_dyn[i] = stats.sets_dyn[i];
+    }
+    
+    for(int i = 0; i < options.n_intervals; i++) {
+      for (int j = 0; j < LOGSAMPLER_BINS; j++) {
+        as.get_bins[i][j]=stats.get_sampler.bins[i][j];
+      }
+      as.get_sum[i] = stats.get_sampler.sum[i];
+      as.get_sum_sq[i] = stats.get_sampler.sum_sq[i];
+    } 
 
+    // Send to master
     string req = s_recv(socket);
     V("req = %s", req.c_str());
     request.rebuild(sizeof(as));
     memcpy(request.data(), &as, sizeof(as));
     socket.send(request);
     V("send = %s", req.c_str());
-	if (log_level > DEBUG) {
+#else 
+    AgentStats as = AgentStats(options.n_intervals);
+
+    as.bs.rx_bytes = stats.rx_bytes;
+    as.bs.tx_bytes = stats.tx_bytes;
+    as.bs.gets = stats.gets;
+    as.bs.sets = stats.sets;
+    as.bs.get_misses = stats.get_misses;
+    as.bs.start = stats.start;
+    as.bs.stop = stats.stop;
+    as.bs.skips = stats.skips;
+    
+    for(int i = 0; i < options.n_intervals; i++){
+      as.gets_dyn[i] = stats.gets_dyn[i];
+      as.sets_dyn[i] = stats.sets_dyn[i];
+    }
+    
+    for(int i = 0; i < options.n_intervals; i++) {
+      for (int j = 0; j < LOGSAMPLER_BINS; j++) {
+        as.get_bins[i][j]=stats.get_sampler.bins[i][j];
+      }
+      as.get_sum[i] = stats.get_sampler.sum[i];
+      as.get_sum_sq[i] = stats.get_sampler.sum_sq[i];
+    }
+
+    // Send to master
+    string req = s_recv(socket);
+    request.rebuild(sizeof(as.bs));
+    memcpy(request.data(), &(as.bs), sizeof(as.bs));
+    socket.send(request);
+
+    req = s_recv(socket);
+    request.rebuild(options.n_intervals * sizeof(uint64_t));
+    memcpy(request.data(), as.gets_dyn, options.n_intervals * sizeof(uint64_t));
+    socket.send(request);
+
+    req = s_recv(socket);
+    request.rebuild(options.n_intervals * sizeof(uint64_t));
+    memcpy(request.data(), as.sets_dyn, options.n_intervals * sizeof(uint64_t));
+    socket.send(request);
+
+    for(int i = 0; i < options.n_intervals; i++) {
+      req = s_recv(socket);
+      request.rebuild(LOGSAMPLER_BINS * sizeof(uint64_t));
+      memcpy(request.data(), as.get_bins[i], LOGSAMPLER_BINS * sizeof(uint64_t));
+      socket.send(request);
+    }
+
+    req = s_recv(socket);
+    request.rebuild(options.n_intervals * sizeof(double));
+    memcpy(request.data(), as.get_sum, options.n_intervals * sizeof(double));
+    socket.send(request);
+
+    req = s_recv(socket);
+    request.rebuild(options.n_intervals * sizeof(uint64_t));
+    memcpy(request.data(), as.get_sum_sq, options.n_intervals * sizeof(double));
+    socket.send(request);   
+
+    //std::cout << "SENDING" << std::endl;
+    //as.print_base();
+    //as.print_dyn();
+    //as.print_bins();
+    //as.print_sum();
+
+#endif
+
+  if (log_level > DEBUG) {
 		stats.print_header(false);
 		printf(" QPS\n");
 		stats.print_stats("read",   stats.get_sampler,false);
 		printf(" %8.1f\n", stats.get_qps());
 	}
 
+  if(options.dyn_agent) {
+    delete[] options.qps_dyn;
+    delete[] options.lambda_dyn;
+  }
+
   }
 }
 
-void prep_agent(const vector<string>& servers, options_t& options) {
-  int sum = options.lambda_denom;
-  int aid=0;
-  if (args.measure_connections_given)
-    sum = args.measure_connections_arg * options.server_given * options.threads;
-
-  int master_sum = sum;
-  if (args.measure_qps_given) {
-    sum = 0;
-    if (options.qps) options.qps -= args.measure_qps_arg;
-  }
-  vector<zmq::socket_t*>::iterator its;
-  for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
-    zmq::socket_t *s=*its;
-    zmq::message_t message(sizeof(options_t));
-	bool status;
-	aid++;
-
-V("Agent %d prep ", aid);
-    memcpy((void *) message.data(), &options, sizeof(options_t));
-    status=poll_send(*s,message);
-D("Agent %d prep send = %s", aid, status?"true":"false");
-
-    zmq::message_t rep;
-    status=poll_recv(*s,&rep);
-D("Agent %d prep recv= %s", aid, status?"true":"false");
-	if (!status) { // problem communicating with this agent, don't use it!
-		W("Agent failure detected, skip agent %d!",aid);
-		its=agent_sockets.erase(its); // remove from list of active agents
-		delete(s);
-		its--; // adjust the iterator since we did not iterate over the next agent
-		continue;
-	}
-    unsigned int num = *((int *) rep.data());
-
-    sum += options.connections * (options.roundrobin ?
-            (servers.size() > num ? servers.size() : num) : 
-            (servers.size() * num));
-	int itid=0;
-	//collect all servers to a single msg
-	string all_servers;
-	deTokenize(all_servers,servers);
-	//send servers msg to agent and wait for ack
-	s_send(*s, all_servers);
-	string response = s_recv(*s);
-	if (response.compare("FAIL-RECV") == 0) {
-		itid=-1;
-	}
-
-	// in case communication with agent broke down, remove from active list
-	if (itid<0) {
-		W("Agent failure detected, skip agent %d!",aid);
-		its=agent_sockets.erase(its); // remove from list of active agents
-		delete(s);
-		its--; // adjust the iterator since we did not iterate over the next agent
-	}
-  }
-
-  
-  // Adjust options_t according to --measure_* arguments.
-  options.lambda_denom = sum;
-  options.lambda = (double) options.qps / options.lambda_denom *
-    args.lambda_mul_arg;
-
-  V("lambda_denom = %d", sum);
-
-  if (args.measure_qps_given) {
-    double master_lambda = (double) args.measure_qps_arg / master_sum;
-
-    if (options.qps && master_lambda > options.lambda)
-      V("warning: master_lambda (%f) > options.lambda (%f)",
-        master_lambda, options.lambda);
-
-    options.lambda = master_lambda;
-  }
-
-  if (args.measure_depth_given) options.depth = args.measure_depth_arg;
-
-  for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
-    zmq::socket_t *s=*its;
-    zmq::message_t message(sizeof(sum));
-    *((int *) message.data()) = sum;
-    poll_send(*s,message);
-    string rep = s_recv(*s);
-	if (rep.compare("FAIL-RECV") == 0) {
-		W("Agent failure detected, skip agent %d!",aid);
-		its=agent_sockets.erase(its); // remove from list of active agents
-		delete(s);
-		its--; // adjust the iterator since we did not iterate over the next agent
-	}
-  }
-
-  // Master sleeps here to give agents a chance to connect to
-  // memcached server before the master, so that the master is never
-  // the very first set of connections.  Is this reasonable or
-  // necessary?  Most probably not.
-  V("MASTER SLEEPS"); sleep_time(1.5);
-}
-
-void finish_agent(ConnectionStats &stats) {
+// ----------------------------------------------------------------------------------------------------
+void finish_agent(ConnectionStats &stats, int n_intervals) {
 	int aid=0;
   //for (auto s: agent_sockets) {
   vector<zmq::socket_t*>::iterator its;
   for ( its=agent_sockets.begin(); its!=agent_sockets.end(); its++ ) {
     zmq::socket_t *s=*its;
-	aid++;
-	bool status;
-    status=s_send(*s, "stats");
-D("Agent %d finish send = %s", aid, status?"true":"false");
+	  aid++;
+	  bool status;
 
-    AgentStats as;
+#ifdef STATIC_ALLOC_SAMPLER
+// Static allocation
+    AgentStats as = AgentStats();
     zmq::message_t message;
-
-    status=poll_recv(*s,&message);
-D("Agent %d finish recv = %s", aid, status?"true":"false");
+    
+    status = s_send(*s, "stats");
+    D("Agent %d finish send = %s", aid, status?"true":"false");
+    status = poll_recv(*s, &message);
     memcpy(&as, message.data(), sizeof(as));
+    D("Agent %d finish recv = %s", aid, status?"true":"false");
+#else
+// Dynamic allocation
+    AgentStats as = AgentStats(n_intervals);
+    zmq::message_t message;
+    
+    status = s_send(*s, "stats");
+    status = poll_recv(*s, &message);
+    memcpy(&(as.bs), message.data(), sizeof(as.bs));
+
+    status = s_send(*s, "gets_dyn");
+    status = poll_recv(*s, &message);
+    memcpy(as.gets_dyn, message.data(), n_intervals * sizeof(uint64_t));
+
+    status = s_send(*s, "sets_dyn");
+    status = poll_recv(*s, &message);
+    memcpy(as.sets_dyn, message.data(), n_intervals * sizeof(uint64_t));
+
+    for(int i = 0; i < n_intervals; i++) {
+      status = s_send(*s, "bins" + i);
+      status = poll_recv(*s, &message);
+      memcpy(as.get_bins[i], message.data(), LOGSAMPLER_BINS * sizeof(uint64_t));
+    }
+
+    status = s_send(*s, "sum");
+    status = poll_recv(*s, &message);
+    memcpy(as.get_sum, message.data(), n_intervals * sizeof(double));
+
+    status = s_send(*s, "sum_sq");
+    status = poll_recv(*s, &message);
+    memcpy(as.get_sum_sq, message.data(), n_intervals * sizeof(double));
+
+    //std::cout << "RECEIVED" << std::endl;
+    //as.print_base();
+    //as.print_dyn();
+    //as.print_bins();
+    //as.print_sum();
+
+#endif
+    // Finally accumulate
     stats.accumulate(as);
   }
+
 }
 
 /*
@@ -647,6 +868,10 @@ string name_to_ipaddr(string host, int addport=1) {
 	return string(ipaddr);
 }
 
+// ----------------------------------------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------------------------------------
+
 int main(int argc, char **argv) {
   if (cmdline_parser(argc, argv, &args) != 0) exit(-1);
 
@@ -757,9 +982,9 @@ int main(int argc, char **argv) {
 	  }
   }
 
-  ConnectionStats stats;
+  ConnectionStats stats(true, options.n_intervals);
   if (args.plot_all_given)
-	stats.plotall=true;
+	  stats.plotall=true;
 
   double peak_qps = 0.0;
   bool avgseek=false;
@@ -874,11 +1099,16 @@ int main(int argc, char **argv) {
     go(servers, options, stats);
   }
 
-  if (!args.scan_given && !args.loadonly_given) {
-    stats.print_header();
-    stats.print_stats("read",   stats.get_sampler, true, true);
-    stats.print_stats("update", stats.set_sampler);
-    stats.print_stats("op_q",   stats.op_sampler);
+  if(args.qps_interval_given) {
+    stats.print_header(false);
+    printf("%8s %8s\n", "QPS", "target");
+    for(int i = 0; i < options.n_intervals; i++) {
+      stats.print_stats("read", stats.get_sampler, false, false, i);
+      printf(" %8.1f", ((float)(stats.gets_dyn[i] + stats.sets_dyn[i]) / options.qps_interval));
+      printf(" %8d\n", options.qps_dyn[i] + options.qps_measure);
+    }
+
+    delete[] options.qps_dyn; 
 
     float total = (float)(stats.gets + stats.sets);
 
@@ -886,12 +1116,42 @@ int main(int argc, char **argv) {
            total / (stats.stop - stats.start),
            total, stats.stop - stats.start);
 
+     printf("\n");
+	
+	  printf("Total connections = %d\n", options.connections * options.server_given * options.threads);
+
+    printf("Misses = %" PRIu64 " (%.1f%%)\n", stats.get_misses,
+           (double) stats.get_misses/stats.gets*100);
+
+    printf("Skipped TXs = %" PRIu64 " (%.1f%%)\n\n", stats.skips,
+           (double) stats.skips / total * 100);
+
+    printf("RX %10" PRIu64 " bytes : %6.1f MB/s\n",
+           stats.rx_bytes,
+           (double) stats.rx_bytes / 1024 / 1024 / (stats.stop - stats.start));
+    printf("TX %10" PRIu64 " bytes : %6.1f MB/s\n",
+           stats.tx_bytes,
+           (double) stats.tx_bytes / 1024 / 1024 / (stats.stop - stats.start));
+  }
+
+  else if (!args.scan_given && !args.loadonly_given) {
+    stats.print_header();
+    stats.print_stats("read",   stats.get_sampler, true, true);
+    stats.print_stats("update", stats.set_sampler);
+    stats.print_stats("op_q",   stats.op_sampler);
+
+    float total = (float)(stats.gets + stats.sets);
+
+    printf("\nTotal QPS = %.1f (%.0f / %.1fs) - %.1f, %.1f\n",
+           total / (stats.stop - stats.start),
+           total, stats.stop - stats.start, (float)stats.gets, (float)stats.sets);
+
     if (args.search_given && peak_qps > 0.0)
       printf("Peak QPS  = %.1f\n", peak_qps);
 
     printf("\n");
 	
-	printf("Total connections = %d\n", options.connections * options.server_given * options.threads);
+	  printf("Total connections = %d\n", options.connections * options.server_given * options.threads);
 
     printf("Misses = %" PRIu64 " (%.1f%%)\n", stats.get_misses,
            (double) stats.get_misses/stats.gets*100);
@@ -917,6 +1177,7 @@ int main(int argc, char **argv) {
         fprintf(file, "%f %f\n", i->start_time - boot_time, i->time());
       }
     }
+    
   }
 
   stop_cpu_stats();
@@ -1047,12 +1308,12 @@ D("Waiting for thread %d.",t);
 	if (args.agent_given || args.agentmode_given) {
     	float total = (float)(stats.gets) + (float)stats.sets;
 
-	    V("Local QPS = %.1f (%lld / %.1fs)",
+	    printf("Local QPS = %.1f (%.0f / %.1fs) - %.1f, %.1f\n",
     	total / (stats.stop - stats.start),
-      	total, stats.stop - stats.start);    
+      	total, stats.stop - stats.start, (float)stats.gets, (float)stats.sets);    
 	}
 	if (args.agent_given > 0) {
-		finish_agent(stats);
+		finish_agent(stats, options.n_intervals);
 	}
 #endif
 D("End of go()");
@@ -1061,7 +1322,7 @@ D("End of go()");
 void* thread_main(void *arg) {
   struct thread_data *td = (struct thread_data *) arg;
 
-  ConnectionStats *cs = new ConnectionStats();
+  ConnectionStats *cs = new ConnectionStats(true, td->options->n_intervals);
 
   do_mcperf(*td->servers, *td->options, *cs, td->master
 #ifdef HAVE_LIBZMQ
@@ -1341,6 +1602,7 @@ void do_mcperf(const vector<string>& servers, options_t& options,
     V("started at %f", get_time());
 
 	start = get_time();
+  
 	if (args.trace_given) { 
 	/* 	To support tracing/simulation, in trace mode, 
 		send special start_trace/stop_trace commands to the server,
@@ -1537,7 +1799,7 @@ void args_to_options(options_t* options) {
   strcpy(options->keyorder, args.keyorder_arg);
   strcpy(options->valuesize, args.valuesize_arg);
   options->update = args.update_arg;
-  options->time = args.time_arg;
+
   options->loadonly = args.loadonly_given;
   options->depth = args.depth_arg;
   options->no_nodelay = args.no_nodelay_given;
@@ -1550,6 +1812,22 @@ void args_to_options(options_t* options) {
   options->moderate = args.moderate_given;
   options->getq_freq = args.getq_freq_given ? args.getq_freq_arg : 0.0;
   options->getq_size = args.getq_size_arg;
+
+  options->dyn_agent = 0;
+  options->dyn_en = args.qps_interval_given;
+  options->qps_min = args.qps_min_arg;
+  options->qps_max = args.qps_max_arg;
+  options->qps_interval = args.qps_interval_arg;
+  options->qps_measure = args.measure_qps_arg;
+  options->qps_seed = args.qps_seed_arg;
+  options->trace_en = args.qps_target_given > 0;
+
+  options->time = (args.qps_target_given > 0) ? (args.qps_target_given * args.qps_interval_arg) : args.time_arg;
+  assert(options->time >= 1);
+
+  options->n_intervals = args.qps_interval_given ? 
+                (args.qps_target_given > 0 ? args.qps_target_given : ((int)(ceil((double)options->time / options->qps_interval)))) : 1;
+
 }
 
 void init_random_stuff() {

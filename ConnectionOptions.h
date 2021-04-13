@@ -3,6 +3,8 @@
 
 #include "distributions.h"
 
+#define MAX_DYN   32
+
 typedef struct {
   int connections;
   bool blocking;
@@ -45,6 +47,20 @@ typedef struct {
   bool moderate;
   double getq_freq;
   int getq_size;
+
+  int dyn_agent;
+  int dyn_en;
+  int trace_en;
+  int qps_min;
+  int qps_max;
+  double qps_interval;
+  int n_intervals;
+  int qps_measure;
+  int qps_seed;
+
+  int *qps_dyn;
+  double *lambda_dyn; 
+
 } options_t;
 
 #endif // CONNECTIONOPTIONS_H

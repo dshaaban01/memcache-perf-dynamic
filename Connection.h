@@ -2,6 +2,9 @@
 
 #include <queue>
 #include <string>
+#include <random>
+#include <chrono>
+#include <vector>
 
 #include <event2/bufferevent.h>
 #include <event2/dns.h>
@@ -62,12 +65,20 @@ public:
 
   ConnectionStats stats;
 
-  void issue_get(const char* key, double now = 0.0);
-  void issue_get_req(const char* key, const char *req, double now = 0.0);
-  void issue_multi_get(int nkeys=50, double now=0.0);
+  // Dynamic
+  int dyn_agent;
+  double next_run_time;
+  int curr_interval;
+  double qps_interval;
+  int curr_id;
+  double *lambda_dyn;
+  int n_intervals;
+
+  void issue_get(const char* key, const char *req, double now = 0.0, int interval = 0);
+  void issue_multi_get(int nkeys=50, double now=0.0, int interval = 0);
   void issue_set(const char* key, const char* value, int length,
-                 double now = 0.0);
-  void issue_something(double now = 0.0);
+                 double now = 0.0, int interval = 0);
+  void issue_something(double now = 0.0, int interval = 0);
   void issue_command(char *cmd);
   void issue_command(char const *cmd) { issue_command(const_cast<char *>(cmd)); }
   void pop_op();
@@ -113,4 +124,5 @@ private:
   KeyGenerator *loadgen;
   CachingKeyGenerator *keygen;
   Generator *iagen;
+
 };

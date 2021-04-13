@@ -32,6 +32,12 @@ option "update" u "Ratio of set:get commands." float default="0.0"
 
 text "\nAdvanced options:"
 
+option "qps_interval" - "Single QPS interval in seconds." double default="1.0" 
+option "qps_max" - "Min dynamic QPS." int default="10000"
+option "qps_min" - "Min dynamic QPS." int default="1000"
+option "qps_target" - "QPS dynamic trace. Full trace needs to be provided." int multiple
+option "qps_seed" - "QPS seed." int default="0"
+
 option "username" U "Username to use for SASL authentication." string
 option "password" P "Password to use for SASL authentication." string
 option "threads" T "Number of threads to spawn." int default="1"

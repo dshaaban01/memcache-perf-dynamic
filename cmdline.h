@@ -73,6 +73,23 @@ struct gengetopt_args_info
   float update_arg;	/**< @brief Ratio of set:get commands. (default='0.0').  */
   char * update_orig;	/**< @brief Ratio of set:get commands. original value given at command line.  */
   const char *update_help; /**< @brief Ratio of set:get commands. help description.  */
+  double qps_interval_arg;	/**< @brief Single QPS interval in seconds. (default='1.0').  */
+  char * qps_interval_orig;	/**< @brief Single QPS interval in seconds. original value given at command line.  */
+  const char *qps_interval_help; /**< @brief Single QPS interval in seconds. help description.  */
+  int qps_max_arg;	/**< @brief Min dynamic QPS. (default='10000').  */
+  char * qps_max_orig;	/**< @brief Min dynamic QPS. original value given at command line.  */
+  const char *qps_max_help; /**< @brief Min dynamic QPS. help description.  */
+  int qps_min_arg;	/**< @brief Min dynamic QPS. (default='1000').  */
+  char * qps_min_orig;	/**< @brief Min dynamic QPS. original value given at command line.  */
+  const char *qps_min_help; /**< @brief Min dynamic QPS. help description.  */
+  int* qps_target_arg;	/**< @brief QPS dynamic trace. Full trace needs to be provided..  */
+  char ** qps_target_orig;	/**< @brief QPS dynamic trace. Full trace needs to be provided. original value given at command line.  */
+  unsigned int qps_target_min; /**< @brief QPS dynamic trace. Full trace needs to be provided.'s minimum occurreces */
+  unsigned int qps_target_max; /**< @brief QPS dynamic trace. Full trace needs to be provided.'s maximum occurreces */
+  const char *qps_target_help; /**< @brief QPS dynamic trace. Full trace needs to be provided. help description.  */
+  int qps_seed_arg;	/**< @brief QPS seed. (default='0').  */
+  char * qps_seed_orig;	/**< @brief QPS seed. original value given at command line.  */
+  const char *qps_seed_help; /**< @brief QPS seed. help description.  */
   char * username_arg;	/**< @brief Username to use for SASL authentication..  */
   char * username_orig;	/**< @brief Username to use for SASL authentication. original value given at command line.  */
   const char *username_help; /**< @brief Username to use for SASL authentication. help description.  */
@@ -173,6 +190,11 @@ struct gengetopt_args_info
   unsigned int valuesize_given ;	/**< @brief Whether valuesize was given.  */
   unsigned int records_given ;	/**< @brief Whether records was given.  */
   unsigned int update_given ;	/**< @brief Whether update was given.  */
+  unsigned int qps_interval_given ;	/**< @brief Whether qps_interval was given.  */
+  unsigned int qps_max_given ;	/**< @brief Whether qps_max was given.  */
+  unsigned int qps_min_given ;	/**< @brief Whether qps_min was given.  */
+  unsigned int qps_target_given ;	/**< @brief Whether qps_target was given.  */
+  unsigned int qps_seed_given ;	/**< @brief Whether qps_seed was given.  */
   unsigned int username_given ;	/**< @brief Whether username was given.  */
   unsigned int password_given ;	/**< @brief Whether password was given.  */
   unsigned int threads_given ;	/**< @brief Whether threads was given.  */
