@@ -1031,7 +1031,8 @@ int main(int argc, char **argv) {
       options.qps = cur_qps;
       options.lambda = (double) options.qps / (double) options.lambda_denom * args.lambda_mul_arg;
 
-      stats = ConnectionStats();
+      stats.~ConnectionStats();
+      new(&stats) ConnectionStats();
 
       go(servers, options, stats);
 
@@ -1054,7 +1055,8 @@ int main(int argc, char **argv) {
       options.qps = cur_qps;
       options.lambda = (double) options.qps / (double) options.lambda_denom * args.lambda_mul_arg;
 
-      stats = ConnectionStats();
+      sstats.~ConnectionStats();
+      new(&stats) ConnectionStats();
 
       go(servers, options, stats);
 
@@ -1086,7 +1088,9 @@ int main(int argc, char **argv) {
       options.qps = q;
       options.lambda = (double) options.qps / (double) options.lambda_denom * args.lambda_mul_arg;
 
-      	stats = ConnectionStats();
+      	stats.~ConnectionStats(); // destruct
+        new(&stats) ConnectionStats();
+
 	reset_cpu_stats();
       	go(servers, options, stats);
 	D("CPU Usage Stats (avg/min/max): %.2Lf%%,%.2Lf%%,%.2Lf%%\n",cpustat.avg,cpustat.min,cpustat.max);
@@ -1305,12 +1309,12 @@ D("Waiting for thread %d.",t);
   }
 
 #ifdef HAVE_LIBZMQ
-	if (args.agent_given || args.agentmode_given) {
+	if (args.agentmode_given) {
     	float total = (float)(stats.gets) + (float)stats.sets;
 
 	    printf("Local QPS = %.1f (%.0f / %.1fs) - %.1f, %.1f\n",
     	total / (stats.stop - stats.start),
-      	total, stats.stop - stats.start, (float)stats.gets, (float)stats.sets);    
+      	total, stats.stop - stats.start, (float)stats.gets, (float)stats.sets);   
 	}
 	if (args.agent_given > 0) {
 		finish_agent(stats, options.n_intervals);

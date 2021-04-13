@@ -73,6 +73,7 @@ public:
   int curr_id;
   double *lambda_dyn;
   int n_intervals;
+  int dyn_en;
 
   void issue_get(const char* key, const char *req, double now = 0.0, int interval = 0);
   void issue_multi_get(int nkeys=50, double now=0.0, int interval = 0);

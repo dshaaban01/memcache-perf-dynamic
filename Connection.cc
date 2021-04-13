@@ -48,6 +48,7 @@ Connection::Connection(struct event_base* _base, struct evdns_base* _evdns,
   qps_interval = options.qps_interval;
   n_intervals = options.n_intervals;
   curr_id = 0;
+  dyn_en = options.dyn_en;
 
   if(dyn_agent) {
     lambda_dyn = new double[n_intervals];
@@ -418,10 +419,12 @@ void Connection::drive_write_machine(double now) {
         next_time += delay;
         next_run_time += delay;
 
-        if(next_run_time > qps_interval * (1 + curr_interval)) {
-          curr_interval++;
-          if(dyn_agent && curr_interval < n_intervals) {
-            iagen->set_lambda(lambda_dyn[curr_interval]);
+        if(dyn_en) {
+          if(next_run_time > qps_interval * (1 + curr_interval)) {
+            curr_interval++;
+            if(dyn_agent && curr_interval < n_intervals) {
+              iagen->set_lambda(lambda_dyn[curr_interval]);
+            }
           }
         }
 
@@ -436,10 +439,12 @@ void Connection::drive_write_machine(double now) {
             next_time += delay;
             next_run_time += delay;
 
-            if(next_run_time > qps_interval * (1 + curr_interval)) {
-              curr_interval++;
-              if(dyn_agent && curr_interval < n_intervals) {
-                iagen->set_lambda(lambda_dyn[curr_interval]);
+            if(dyn_en) {
+              if(next_run_time > qps_interval * (1 + curr_interval)) {
+                curr_interval++;
+                if(dyn_agent && curr_interval < n_intervals) {
+                  iagen->set_lambda(lambda_dyn[curr_interval]);
+                }
               }
             }
           }
