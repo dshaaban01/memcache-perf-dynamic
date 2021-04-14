@@ -1055,7 +1055,7 @@ int main(int argc, char **argv) {
       options.qps = cur_qps;
       options.lambda = (double) options.qps / (double) options.lambda_denom * args.lambda_mul_arg;
 
-      sstats.~ConnectionStats();
+      stats.~ConnectionStats();
       new(&stats) ConnectionStats();
 
       go(servers, options, stats);
