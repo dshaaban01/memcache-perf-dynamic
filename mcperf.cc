@@ -74,7 +74,7 @@ double boot_time;
 void init_random_stuff();
 
 void go(const vector<string> &servers, options_t &options,
-        ConnectionStats &stats
+        ConnectionStats &stats, uint64_t &start, uint64_t &end
 #ifdef HAVE_LIBZMQ
 , zmq::socket_t* socket = NULL
 #endif
@@ -532,7 +532,8 @@ V("sent ack");
 
 V("launching go");
     // Run 
-    go(servers, options, stats, &socket);
+    uint64_t start, end;
+    go(servers, options, stats, start, end, &socket);
 
 V("Done run.");
     // Run done. Send the stats back to the master.
@@ -991,6 +992,8 @@ int main(int argc, char **argv) {
   double peak_qps = 0.0;
   bool avgseek=false;
 
+  uint64_t start, end;
+
   if (args.search_given) {
     char *n_ptr = strtok(args.search_arg, ":");
     char *x_ptr = strtok(NULL, ":");
@@ -1012,7 +1015,7 @@ int main(int argc, char **argv) {
     double nth;
     int cur_qps;
 
-    go(servers, options, stats);
+    go(servers, options, stats, start, end);
 
     if (avgseek) nth=stats.get_avg();
     else nth = stats.get_nth(n);
@@ -1036,7 +1039,7 @@ int main(int argc, char **argv) {
       stats.~ConnectionStats();
       new(&stats) ConnectionStats();
 
-      go(servers, options, stats);
+      go(servers, options, stats, start, end);
 
       if (avgseek) nth=stats.get_avg();
       else nth = stats.get_nth(n);
@@ -1060,7 +1063,7 @@ int main(int argc, char **argv) {
       stats.~ConnectionStats();
       new(&stats) ConnectionStats();
 
-      go(servers, options, stats);
+      go(servers, options, stats, start, end);
 
       if (avgseek) nth=stats.get_avg();
       else nth = stats.get_nth(n);
@@ -1081,8 +1084,8 @@ int main(int argc, char **argv) {
     int max = atoi(max_ptr);
     int step = atoi(step_ptr);
 	
-	stats.print_header(false);
-    printf("%8s %8s\n", "QPS", "target");
+	  stats.print_header(false);
+    printf("%9s %8s %14s %14s\n", "QPS", "target", "ts_start", "ts_end");    
 
     for (int q = min; q <= max; q += step) {
       args_to_options(&options);
@@ -1094,20 +1097,25 @@ int main(int argc, char **argv) {
         new(&stats) ConnectionStats();
 
 	reset_cpu_stats();
-      	go(servers, options, stats);
+      	go(servers, options, stats, start, end);
 	D("CPU Usage Stats (avg/min/max): %.2Lf%%,%.2Lf%%,%.2Lf%%\n",cpustat.avg,cpustat.min,cpustat.max);
 
       	stats.print_stats("read", stats.get_sampler, false);
       	printf(" %8.1f", stats.get_qps());
-      	printf(" %8d\n", q);
+      	printf(" %8d", q);
+        printf(" %14ld", start);
+        printf(" %14ld\n", end);
     }    
   } else {
-    go(servers, options, stats);
+    go(servers, options, stats, start, end);
   }
 
   if(args.qps_interval_given) {
+    std::cout << "Timestamp start: " << start << std::endl;
+    std::cout << "Timestamp end: " << end << std::endl << std::endl;
+
     stats.print_header(false);
-    printf("%8s %8s\n", "QPS", "target");
+    printf("%9s %8s\n", "QPS", "target");
     for(int i = 0; i < options.n_intervals; i++) {
       stats.print_stats("read", stats.get_sampler, false, false, i);
       printf(" %8.1f", ((float)(stats.gets_dyn[i] + stats.sets_dyn[i]) / options.qps_interval));
@@ -1141,6 +1149,9 @@ int main(int argc, char **argv) {
   }
 
   else if (!args.scan_given && !args.loadonly_given) {
+    std::cout << "Timestamp start: " << start << std::endl;
+    std::cout << "Timestamp end: " << end << std::endl << std::endl;
+    
     stats.print_header();
     stats.print_stats("read",   stats.get_sampler, true, true);
     stats.print_stats("update", stats.set_sampler);
@@ -1213,7 +1224,7 @@ int main(int argc, char **argv) {
 }
 
 void go(const vector<string>& servers, options_t& options,
-        ConnectionStats &stats
+        ConnectionStats &stats, uint64_t& start, uint64_t& end
 #ifdef HAVE_LIBZMQ
 , zmq::socket_t* socket
 #endif
@@ -1238,6 +1249,9 @@ V("Agent prep done.");
     int current_cpu = -1;
     //options.qps/=options.threads;
     //options.lambda/=(double)options.threads;
+
+    start = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
 D("Starting %d threads.", options.threads);
     for (int t = 0; t < options.threads; t++) {
       td[t].options = &options;
@@ -1310,6 +1324,8 @@ D("Waiting for thread %d.",t);
 #endif
   }
 
+  end = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
 #ifdef HAVE_LIBZMQ
 	if (args.agentmode_given) {
     	float total = (float)(stats.gets) + (float)stats.sets;
@@ -1371,7 +1387,6 @@ void do_mcperf(const vector<string>& servers, options_t& options,
   //  event_base_priority_init(base, 2);
 
   // FIXME: May want to move this to after all connections established.
-  if(!options.dyn_agent) std::cout << "Timestamp start: " << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count() << std::endl;
   double start = get_time();
   double now = start;
 
@@ -1672,7 +1687,6 @@ void do_mcperf(const vector<string>& servers, options_t& options,
 
 	stats.start = start;
 	stats.stop = now;
-  if(!options.dyn_agent) std::cout << "Timestamp end: " << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count() << std::endl;
 
 	event_config_free(config);
 	evdns_base_free(evdns, 0);
