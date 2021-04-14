@@ -15,6 +15,7 @@
 #include <queue>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
@@ -45,6 +46,7 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 using namespace std;
+using namespace std::chrono;
 
 gengetopt_args_info args;
 char random_char[2 * 1024 * 1024];  // Buffer used to generate random values.
@@ -1369,6 +1371,7 @@ void do_mcperf(const vector<string>& servers, options_t& options,
   //  event_base_priority_init(base, 2);
 
   // FIXME: May want to move this to after all connections established.
+  if(!options.dyn_agent) std::cout << "Timestamp start: " << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count() << std::endl;
   double start = get_time();
   double now = start;
 
@@ -1669,6 +1672,7 @@ void do_mcperf(const vector<string>& servers, options_t& options,
 
 	stats.start = start;
 	stats.stop = now;
+  if(!options.dyn_agent) std::cout << "Timestamp end: " << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count() << std::endl;
 
 	event_config_free(config);
 	evdns_base_free(evdns, 0);
