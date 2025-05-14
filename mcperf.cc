@@ -43,6 +43,14 @@
 #include "util.h"
 #include "cpu_stat_thread.h"
 
+#include <signal.h>
+
+volatile sig_atomic_t interrupted = 0;
+
+void handle_interrupt(int signum) {
+  interrupted = 1;
+}
+
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 using namespace std;
@@ -1107,7 +1115,18 @@ int main(int argc, char **argv) {
         printf(" %14ld\n", end);
     }    
   } else {
+    signal(SIGINT, handle_interrupt);
     go(servers, options, stats, start, end);
+    if (interrupted) {
+      std::cerr << "\nBenchmark interrupted. Dumping partial results...\n";
+    
+      stats.stop = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
+      stats.print_header();
+      stats.print_stats("read", stats.get_sampler, true, true);
+      stats.print_stats("update", stats.set_sampler);
+      stats.print_stats("op_q", stats.op_sampler);
+  }
   }
 
   if(args.qps_interval_given) {
@@ -1436,27 +1455,27 @@ void do_mcperf(const vector<string>& servers, options_t& options,
 
   D("evt based loop start\n");
   while (1) {
-    // FIXME: If all connections become ready before event_base_loop
-    // is called, this will deadlock.
-    event_base_loopexit(base, &delay);
-    event_base_loop(base, EVLOOP_ONCE);
+    if (interrupted) {
+      V("Interrupted! Forcing shutdown...");
+      break;
+    }
+
+    event_base_loop(base, loop_flag);
+
+    struct timeval now_tv;
+    event_base_gettimeofday_cached(base, &now_tv);
+    now = tv_to_double(&now_tv);
 
     bool restart = false;
-	 vector<Connection*>::iterator conn;
-	lcntr++;
-	int cid=0;
-    for (conn= connections.begin(); conn!=connections.end(); conn++ ) {
-		if ((*conn)->read_state != Connection::IDLE) {
-			restart = true;
-		}
-		cid++;
-		if ((lcntr & 0x3f) == 0) {
-			V("evt based loop [%d] taking long time. read state=%d/%d",lcntr,(*conn)->read_state,cid);
-		}
-	}
-    if (restart) continue;
-    else break;
+    for (auto conn : connections) {
+      if (!conn->check_exit_condition(now)) {
+        restart = true;
+      }
+    }
+
+    if (!restart) break;
   }
+
   D("evt based loop end\n");
 
   // Load database on lead connection for each server.
